@@ -1,0 +1,556 @@
+-- Giảm giá 10% cho khách nếu đặt vào hôm sinh nhật
+
+CREATE OR REPLACE TRIGGER TRG_GIAMGIA_SINHNHA
+BEFORE INSERT ON CHITIETDONHANG
+FOR EACH ROW
+DECLARE
+    v_NgaySinh DATE;
+    v_NgayDat DATE;
+    v_DonGia NUMBER;
+    v_SoLuong NUMBER;
+BEGIN
+    -- Lấy ngày đặt từ bảng DONHANG
+    SELECT NgayDat INTO v_NgayDat
+    FROM DONHANG
+    WHERE MaDH = :NEW.MaDH;
+
+    -- Lấy ngày sinh của khách hàng từ DONHANG → KHACHHANG
+    SELECT kh.NgaySinh INTO v_NgaySinh
+    FROM DONHANG dh
+    JOIN KHACHHANG kh ON dh.MaKH = kh.MaKH
+    WHERE dh.MaDH = :NEW.MaDH;
+
+    -- Lấy đơn giá hiện tại của hoa
+    SELECT DonGia INTO v_DonGia
+    FROM HOA
+    WHERE MaHoa = :NEW.MaHoa;
+
+    -- Gán số lượng
+    v_SoLuong := :NEW.SoLuong;
+
+    -- Kiểm tra ngày sinh nhật (chỉ so sánh ngày và tháng)
+    IF TO_CHAR(v_NgaySinh, 'MM-DD') = TO_CHAR(v_NgayDat, 'MM-DD') THEN
+        -- Giảm 10%
+        :NEW.GiaGiam := ROUND(v_DonGia * v_SoLuong * 0.1, 2);
+        :NEW.ThanhTien := ROUND(v_DonGia * v_SoLuong * 0.9, 2);
+        :NEW.DonGia := v_DonGia; -- Đảm bảo đơn giá gốc được lưu
+    ELSE
+        -- Không giảm giá
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := v_DonGia * v_SoLuong;
+        :NEW.DonGia := v_DonGia;
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        -- Nếu không tìm thấy dữ liệu (lỗi logic), để mặc định không giảm
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := :NEW.DonGia * :NEW.SoLuong;
+END;
+/
+
+
+
+===============
+-- Test
+-- Bước 1: Cập nhật NgaySinh cho khách hang
+UPDATE KHACHHANG SET NgaySinh = TO_DATE('1990-03-15', 'YYYY-MM-DD') WHERE MaKH = 'KH01';
+-- Bước 2: Tạo đơn hàng vào đúng ngày sinh nhật (ví dụ: KH01 sinh 15/03 → đặt ngày 15/03)
+-- Đặt hàng vào ngày 15/03/2025 (giả lập sinh nhật KH01)
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_BIRTH01', N'Đã giao', TO_DATE('2025-03-15', 'YYYY-MM-DD'), 'KH01', 'NV01', 'CN01', 'K01');
+-- Thêm chi tiết đơn hàng → trigger sẽ tự động giảm 10%
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_BIRTH01', 'H01', 10);
+-- Bước 3: Tạo đơn hàng không phải sinh nhật (để kiểm tra không giảm)
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_NORMAL01', N'Đã giao', TO_DATE('2025-04-01', 'YYYY-MM-DD'), 'KH01', 'NV01', 'CN01', 'K01');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_NORMAL01', 'H01', 10);
+-- Bước 4: Kiểm tra kết quả
+-- Xem chi tiết đơn hàng có giảm giá
+SELECT 
+    dh.MaDH,
+    kh.TenKH,
+    TO_CHAR(dh.NgayDat, 'DD/MM/YYYY') AS NgayDat,
+    TO_CHAR(kh.NgaySinh, 'DD/MM') AS SinhNhat,
+    ctdh.MaHoa,
+    h.TenHoa,
+    ctdh.SoLuong,
+    ctdh.DonGia,
+    ctdh.GiaGiam,
+    ctdh.ThanhTien
+FROM DONHANG dh
+JOIN KHACHHANG kh ON dh.MaKH = kh.MaKH
+JOIN CHITIETDONHANG ctdh ON dh.MaDH = ctdh.MaDH
+JOIN HOA h ON ctdh.MaHoa = h.MaHoa
+WHERE dh.MaDH IN ('DH_BIRTH01', 'DH_NORMAL01')
+ORDER BY dh.MaDH;
+
+
+=====================================================
+Tăng giá 15% cho các mặt hàng hoa khi đặt hàng vào các ngày lễ quan trọng: Các ngày lễ: 14/2, 8/3, 20/10, 1/1
+CREATE OR REPLACE TRIGGER TRG_TANGGIA_NGAYLE
+BEFORE INSERT ON CHITIETDONHANG
+FOR EACH ROW
+DECLARE
+    v_NgayDat DATE;
+    v_DonGiaGoc NUMBER;
+    v_SoLuong NUMBER;
+    v_NgayLe BOOLEAN := FALSE;
+BEGIN
+    -- Lấy ngày đặt đơn hàng
+    SELECT NgayDat INTO v_NgayDat
+    FROM DONHANG
+    WHERE MaDH = :NEW.MaDH;
+
+    -- Lấy đơn giá gốc từ bảng HOA
+    SELECT DonGia INTO v_DonGiaGoc
+    FROM HOA
+    WHERE MaHoa = :NEW.MaHoa;
+
+    v_SoLuong := :NEW.SoLuong;
+
+    -- Kiểm tra có phải ngày lễ không
+    IF TO_CHAR(v_NgayDat, 'MM-DD') IN ('02-14', '03-08', '10-20', '01-01') THEN
+        v_NgayLe := TRUE;
+    END IF;
+
+    -- Áp dụng tăng giá 15% nếu là ngày lễ
+    IF v_NgayLe THEN
+        :NEW.DonGia := ROUND(v_DonGiaGoc * 1.15, 2);  -- Tăng 15%
+        :NEW.GiaGiam := 0;                            -- Không giảm giá
+        :NEW.ThanhTien := ROUND(:NEW.DonGia * v_SoLuong, 2);
+    ELSE
+        :NEW.DonGia := v_DonGiaGoc;                   -- Giữ nguyên giá gốc
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := v_DonGiaGoc * v_SoLuong;
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        -- Nếu không tìm thấy dữ liệu (lỗi), dùng giá mặc định
+        :NEW.DonGia := :NEW.DonGia;
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := :NEW.DonGia * :NEW.SoLuong;
+END;
+/
+
+================================
+-- Bước 1: Tạo đơn hàng vào ngày lễ 14/2/2025 (Valentine)
+-- Đơn hàng ngày 14/02/2025 → tăng 15%
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_VALENTINE', N'Đã giao', TO_DATE('2025-02-14', 'YYYY-MM-DD'), 'KH01', 'NV01', 'CN01', 'K01');
+
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_VALENTINE', 'H01', 10);  -- Hồng Đỏ: 15,000 → 17,250
+-- Bước 2: Tạo đơn hàng vào ngày thường (để so sánh)
+-- Đơn hàng ngày thường → giá gốc
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_NORMAL02', N'Đã giao', TO_DATE('2025-02-15', 'YYYY-MM-DD'), 'KH01', 'NV01', 'CN01', 'K01');
+
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_NORMAL02', 'H01', 10);
+-- Bước 3: Test thêm ngày 8/3, 20/10, 1/1
+-- 8/3
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_8_3', N'Đã giao', TO_DATE('2025-03-08', 'YYYY-MM-DD'), 'KH02', 'NV02', 'CN02', 'K02');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong) VALUES ('DH_8_3', 'H02', 5);
+
+-- 20/10
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_20_10', N'Đã giao', TO_DATE('2025-10-20', 'YYYY-MM-DD'), 'KH03', 'NV03', 'CN03', 'K03');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong) VALUES ('DH_20_10', 'H03', 8);
+
+-- 1/1
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_1_1', N'Đã giao', TO_DATE('2025-01-01', 'YYYY-MM-DD'), 'KH04', 'NV04', 'CN04', 'K04');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong) VALUES ('DH_1_1', 'H04', 12);
+-- Bước 4: Xem kết quả
+SELECT 
+    dh.MaDH,
+    TO_CHAR(dh.NgayDat, 'DD/MM/YYYY') AS NgayDat,
+    ctdh.MaHoa,
+    h.TenHoa,
+    ctdh.SoLuong,
+    h.DonGia AS DonGiaGoc,
+    ctdh.DonGia AS DonGiaBan,
+    ctdh.GiaGiam,
+    ctdh.ThanhTien
+FROM DONHANG dh
+JOIN CHITIETDONHANG ctdh ON dh.MaDH = ctdh.MaDH
+JOIN HOA h ON ctdh.MaHoa = h.MaHoa
+WHERE dh.MaDH IN ('DH_VALENTINE', 'DH_NORMAL02', 'DH_8_3', 'DH_20_10', 'DH_1_1')
+ORDER BY dh.NgayDat;
+
+
+==========================================================
+--Hoa tồn kho quá 5 ngày kể từ ngày nhập sẽ bị đánh dấu “Xả hàng”.
+-- Bước 1: Thêm cột TrangThaiXuat vào bảng TONKHO
+ALTER TABLE TONKHO ADD TrangThaiXuat NVARCHAR2(20);
+-- Bước 2: Tạo procedure cập nhật trạng thái
+CREATE OR REPLACE PROCEDURE CapNhat_XaHang
+AS
+BEGIN
+    UPDATE TONKHO tk
+    SET TrangThaiXuat = (
+        SELECT 
+            CASE 
+                WHEN MAX(dnh.NgayNhap) IS NOT NULL 
+                 AND SYSDATE - MAX(dnh.NgayNhap) > 5 
+                THEN N'Xả hàng'
+                ELSE NULL
+            END
+        FROM CHITIETNHAPHANG ctnh
+        JOIN DONNHAPHANG dnh ON ctnh.MaDonNhapHang = dnh.MaDonNhapHang
+        WHERE ctnh.MaHoa = tk.MaHoa 
+          AND ctnh.MaKho = tk.MaKho
+    )
+    WHERE EXISTS (
+        SELECT 1 
+        FROM CHITIETNHAPHANG ctnh
+        JOIN DONNHAPHANG dnh ON ctnh.MaDonNhapHang = dnh.MaDonNhapHang
+        WHERE ctnh.MaHoa = tk.MaHoa 
+          AND ctnh.MaKho = tk.MaKho
+    );
+    
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Cập nhật trạng thái xả hàng thành công.');
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        DBMS_OUTPUT.PUT_LINE('Lỗi: ' || SQLERRM);
+END;
+/
+-- Bước 3: Tạo DBMS_SCHEDULER JOB chạy hàng ngày
+BEGIN
+    DBMS_SCHEDULER.CREATE_JOB (
+        job_name        => 'JOB_CAPNHAT_XAHANG',
+        job_type        => 'PLSQL_BLOCK',
+        job_action      => 'BEGIN CapNhat_XaHang; END;',
+        start_date      => SYSTIMESTAMP,
+        repeat_interval => 'FREQ=DAILY; BYHOUR=2',  -- Chạy lúc 2h sáng hàng ngày
+        enabled         => TRUE,
+        comments        => 'Cập nhật trạng thái xả hàng cho hoa tồn > 5 ngày'
+    );
+END;
+/
+-- Bước 4: Trigger tự động khi nhập hàng mới
+CREATE OR REPLACE TRIGGER TRG_SAU_NHAPHANG
+AFTER INSERT ON CHITIETNHAPHANG
+FOR EACH ROW
+BEGIN
+    -- Gọi cập nhật trạng thái cho hoa vừa nhập
+    UPDATE TONKHO
+    SET TrangThaiXuat = NULL  -- Reset vì có nhập mới
+    WHERE MaKho = :NEW.MaKho AND MaHoa = :NEW.MaHoa;
+END;
+/
+==================================================
+-- Test
+-- Bước 1: Nhập hàng cũ (giả lập > 5 ngày)
+-- Nhập hàng ngày 2025-10-25 (hôm nay là 2025-11-05 → > 5 ngày)
+INSERT INTO DONNHAPHANG (MaDonNhapHang, NgayNhap, MaNV, MaChiNhanh)
+VALUES ('DN_TEST01', TO_DATE('2025-10-25', 'YYYY-MM-DD'), 'NV01', 'CN01');
+
+INSERT INTO CHITIETNHAPHANG (MaDonNhapHang, MaHoa, MaKho, SoLuongNhap, DonGiaNhap)
+VALUES ('DN_TEST01', 'H01', 'K01', 20, 8000);
+
+-- Cập nhật tồn kho
+UPDATE TONKHO SET SoLuongTon = SoLuongTon + 20 WHERE MaKho = 'K01' AND MaHoa = 'H01';
+-- Bước 2: Chạy procedure cập nhật
+BEGIN
+    CapNhat_XaHang;
+END;
+/
+--Bước 3: Kiểm tra kết quả
+SELECT 
+    tk.MaKho,
+    tk.MaHoa,
+    h.TenHoa,
+    tk.SoLuongTon,
+    MAX(dnh.NgayNhap) AS NgayNhap_GanNhat,
+    ROUND(SYSDATE - MAX(dnh.NgayNhap), 1) AS SoNgayTon,
+    tk.TrangThaiXuat
+FROM TONKHO tk
+JOIN HOA h ON tk.MaHoa = h.MaHoa
+LEFT JOIN CHITIETNHAPHANG ctnh ON tk.MaHoa = ctnh.MaHoa AND tk.MaKho = ctnh.MaKho
+LEFT JOIN DONNHAPHANG dnh ON ctnh.MaDonNhapHang = dnh.MaDonNhapHang
+WHERE tk.MaKho = 'K01' AND tk.MaHoa = 'H01'
+GROUP BY tk.MaKho, tk.MaHoa, h.TenHoa, tk.SoLuongTon, tk.TrangThaiXuat;
+===============================
+--Ngày sinh của khách hàng (nếu có) phải nhỏ hơn ngày hiện tại và khách hàng phải ≥ 15 tuổi.
+CREATE OR REPLACE TRIGGER TRG_KIEMTRA_NGAYSINH_KHACHHANG
+BEFORE INSERT OR UPDATE OF NgaySinh ON KHACHHANG
+FOR EACH ROW
+DECLARE
+    v_Tuoi NUMBER;
+BEGIN
+    -- 1. Kiểm tra ngày sinh không được là ngày tương lai
+    IF :NEW.NgaySinh >= TRUNC(SYSDATE) THEN
+        RAISE_APPLICATION_ERROR(-20001, 
+            'Lỗi: Ngày sinh không được là ngày hiện tại hoặc tương lai!');
+    END IF;
+
+    -- 2. Tính tuổi (làm tròn xuống)
+    v_Tuoi := FLOOR(MONTHS_BETWEEN(TRUNC(SYSDATE), :NEW.NgaySinh) / 12);
+
+    -- 3. Kiểm tra tuổi >= 15
+    IF v_Tuoi < 15 THEN
+        RAISE_APPLICATION_ERROR(-20002, 
+            'Lỗi: Khách hàng phải từ 15 tuổi trở lên! Tuổi hiện tại: ' || v_Tuoi);
+    END IF;
+
+END;
+/
+====================
+--Test
+-- 1. Thêm khách hợp lệ (≥ 15 tuổi, ngày sinh < hôm nay)
+-- Hợp lệ: 20 tuổi
+INSERT INTO KHACHHANG (MaKH, TenKH, GioiTinh, NgaySinh)
+VALUES ('KH_TEST01', N'Nguyễn Văn Test', 'Nam', TO_DATE('2000-05-15', 'YYYY-MM-DD'));
+-- Thành công
+--2. Thêm khách < 15 tuổi → Lỗi
+-- Lỗi: chỉ 14 tuổi
+INSERT INTO KHACHHANG (MaKH, TenKH, GioiTinh, NgaySinh)
+VALUES ('KH_TEST02', N'Trần Thị Bé', 'Nữ', TO_DATE('2011-06-20', 'YYYY-MM-DD'));
+-- ORA-20002: Khách hàng phải từ 15 tuổi trở lên! Tuổi hiện tại: 14
+3. Thêm khách sinh ngày mai → Lỗi
+-- Lỗi: ngày sinh trong tương lai
+INSERT INTO KHACHHANG (MaKH, TenKH, GioiTinh, NgaySinh)
+VALUES ('KH_TEST03', N'Lê Văn Tương Lai', 'Nam', SYSDATE + 1);
+-- ORA-20001: Ngày sinh không được là ngày hiện tại hoặc tương lai!
+--4. Cập nhật ngày sinh sai → Lỗi
+-- Cập nhật thành ngày sinh tương lai
+UPDATE KHACHHANG SET NgaySinh = SYSDATE + 10 WHERE MaKH = 'KH_TEST01';
+-- Lỗi
+-- Cập nhật thành < 15 tuổi
+UPDATE KHACHHANG SET NgaySinh = TO_DATE('2020-01-01', 'YYYY-MM-DD') WHERE MaKH = 'KH_TEST01';
+-- Lỗi: Tuổi hiện tại: 5
+5. Cập nhật hợp lệ
+UPDATE KHACHHANG SET NgaySinh = TO_DATE('1995-03-10', 'YYYY-MM-DD') WHERE MaKH = 'KH_TEST01';
+-- Thành công (30 tuổi)
+========================================
+-- Tự động cập nhật trạng thái VIP hàng tháng
+-- Mỗi ngày 1 của tháng, hệ thống tự động:
+-- Tính tổng chi tiêu của từng khách trong năm hiện tại
+-- Cập nhật cột LoaiKhach trong bảng KHACHHANG:
+-- 'VIP' nếu ≥ 20.000.000
+-- 'Thường' nếu < 20.000.000
+--Bước 1: Thêm cột LoaiKhach vào bảng KHACHHANG
+ALTER TABLE KHACHHANG ADD LoaiKhach NVARCHAR2(10) DEFAULT 'Thường';
+-- Bước 2: Tạo PROCEDURE cập nhật VIP
+CREATE OR REPLACE PROCEDURE CapNhat_TrangThai_VIP
+AS
+BEGIN
+    UPDATE KHACHHANG kh
+    SET LoaiKhach = (
+        SELECT 
+            CASE 
+                WHEN NVL(SUM(ct.ThanhTien), 0) >= 20000000 THEN N'VIP'
+                ELSE N'Thường'
+            END
+        FROM DONHANG dh
+        JOIN CHITIETDONHANG ct ON dh.MaDH = ct.MaDH
+        WHERE dh.MaKH = kh.MaKH
+          AND EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE)
+        GROUP BY dh.MaKH
+    )
+    WHERE EXISTS (
+        SELECT 1 FROM DONHANG dh
+        WHERE dh.MaKH = kh.MaKH
+          AND EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE)
+    );
+
+    -- Đặt lại 'Thường' cho khách không có đơn hàng trong năm
+    UPDATE KHACHHANG
+    SET LoaiKhach = N'Thường'
+    WHERE LoaiKhach IS NULL
+       OR (LoaiKhach = 'VIP' 
+           AND MaKH NOT IN (
+               SELECT dh.MaKH 
+               FROM DONHANG dh 
+               WHERE EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE)
+           ));
+
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Cập nhật trạng thái VIP thành công vào ' || TO_CHAR(SYSDATE, 'DD/MM/YYYY HH24:MI:SS'));
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        DBMS_OUTPUT.PUT_LINE('Lỗi cập nhật VIP: ' || SQLERRM);
+END;
+/
+-- Bước 3: Tạo DBMS_SCHEDULER JOB chạy ngày 1 hàng tháng
+BEGIN
+    -- Xóa job cũ nếu tồn tại
+    BEGIN
+        DBMS_SCHEDULER.DROP_JOB('JOB_CAPNHAT_VIP');
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+
+    -- Tạo job mới
+    DBMS_SCHEDULER.CREATE_JOB (
+        job_name        => 'JOB_CAPNHAT_VIP',
+        job_type        => 'PLSQL_BLOCK',
+        job_action      => 'BEGIN CapNhat_TrangThai_VIP; END;',
+        start_date      => TRUNC(ADD_MONTHS(SYSDATE, 1), 'MM'), -- Ngày 1 tháng sau
+        repeat_interval => 'FREQ=MONTHLY; BYMONTHDAY=1; BYHOUR=2', -- 2h sáng ngày 1
+        enabled         => TRUE,
+        auto_drop       => FALSE,
+        comments        => 'Tự động cập nhật trạng thái VIP cho khách hàng vào ngày 1 hàng tháng'
+    );
+END;
+/
+-- Bước 4: Kiểm tra JOB đã tạo thành công
+SELECT job_name, enabled, last_start_date, next_run_date, schedule_name
+FROM USER_SCHEDULER_JOBS
+WHERE job_name = 'JOB_CAPNHAT_VIP';
+--Bước 5: TEST thủ công (trước khi đợi đến tháng sau)
+-- 1. Chạy thủ công
+BEGIN
+    CapNhat_TrangThai_VIP;
+END;
+/
+
+-- 2. Xem kết quả
+SELECT MaKH, TenKH, LoaiKhach,
+       (SELECT NVL(SUM(ct.ThanhTien), 0)
+        FROM DONHANG dh
+        JOIN CHITIETDONHANG ct ON dh.MaDH = ct.MaDH
+        WHERE dh.MaKH = kh.MaKH
+          AND EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE)
+       ) AS TongChiTieu_Nam
+FROM KHACHHANG kh
+ORDER BY TongChiTieu_Nam DESC;
+
+=============================
+Khách hàng VIP (Chi >= 20 triệu/năm) sẽ được hưởng ưu đãi 15% tất cả đơn hang
+-- Bước 1: Tạo hàm kiểm tra khách VIP
+CREATE OR REPLACE FUNCTION KiemTra_KhachVIP(p_MaKH VARCHAR2) RETURN BOOLEAN
+IS
+    v_TongChiTieu NUMBER := 0;
+BEGIN
+    SELECT NVL(SUM(ct.ThanhTien), 0)
+    INTO v_TongChiTieu
+    FROM DONHANG dh
+    JOIN CHITIETDONHANG ct ON dh.MaDH = ct.MaDH
+    WHERE dh.MaKH = p_MaKH
+      AND EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE);
+
+    RETURN v_TongChiTieu >= 20000000;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN FALSE;
+END;
+/
+-- Bước 2: Tạo trigger áp dụng giảm giá VIP
+CREATE OR REPLACE TRIGGER TRG_UUDAI_KHACHVIP
+BEFORE INSERT ON CHITIETDONHANG
+FOR EACH ROW
+DECLARE
+    v_DonGiaGoc NUMBER;
+    v_SoLuong NUMBER;
+    v_MaKH VARCHAR2(10);
+    v_IsVIP BOOLEAN := FALSE;
+BEGIN
+    -- Lấy đơn giá gốc
+    SELECT DonGia INTO v_DonGiaGoc
+    FROM HOA WHERE MaHoa = :NEW.MaHoa;
+
+    -- Lấy số lượng
+    v_SoLuong := :NEW.SoLuong;
+
+    -- Lấy MaKH từ DONHANG
+    SELECT MaKH INTO v_MaKH
+    FROM DONHANG WHERE MaDH = :NEW.MaDH;
+
+    -- Kiểm tra VIP
+    v_IsVIP := KiemTra_KhachVIP(v_MaKH);
+
+    IF v_IsVIP THEN
+        :NEW.DonGia := v_DonGiaGoc;                    -- Giá gốc
+        :NEW.GiaGiam := ROUND(v_DonGiaGoc * v_SoLuong * 0.15, 2); -- Giảm 15%
+        :NEW.ThanhTien := ROUND(v_DonGiaGoc * v_SoLuong * 0.85, 2); -- 85%
+    ELSE
+        :NEW.DonGia := v_DonGiaGoc;
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := v_DonGiaGoc * v_SoLuong;
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        :NEW.DonGia := v_DonGiaGoc;
+        :NEW.GiaGiam := 0;
+        :NEW.ThanhTien := v_DonGiaGoc * v_SoLuong;
+END;
+/
+-- Bước 3: Tạo VIEW theo dõi khách VIP
+CREATE OR REPLACE VIEW V_KHACHHANG_VIP AS
+SELECT 
+    kh.MaKH,
+    kh.TenKH,
+    NVL(SUM(ct.ThanhTien), 0) AS TongChiTieu_Nam,
+    CASE 
+        WHEN NVL(SUM(ct.ThanhTien), 0) >= 20000000 THEN N'VIP'
+        ELSE N'Thường'
+    END AS LoaiKhach
+FROM KHACHHANG kh
+LEFT JOIN DONHANG dh ON kh.MaKH = dh.MaKH 
+    AND EXTRACT(YEAR FROM dh.NgayDat) = EXTRACT(YEAR FROM SYSDATE)
+LEFT JOIN CHITIETDONHANG ct ON dh.MaDH = ct.MaDH
+GROUP BY kh.MaKH, kh.TenKH
+ORDER BY TongChiTieu_Nam DESC;
+===========================
+--Test
+-- Bước 1: Tạo dữ liệu giả lập khách VIP (≥ 20 triệu)
+-- Tạo đơn hàng lớn cho KH01 để đạt VIP
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_VIP01', N'Đã giao', SYSDATE, 'KH01', 'NV01', 'CN01', 'K01');
+
+-- Mua 200 bó Hồng Đỏ (15000 * 200 = 3tr)
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_VIP01', 'H01', 200);  -- 3,000,000
+
+-- Lặp lại 7 lần → 21,000,000
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_VIP02', N'Đã giao', SYSDATE, 'KH01', 'NV01', 'CN01', 'K01');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong) VALUES ('DH_VIP02', 'H01', 200);
+
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_VIP03', N'Đã giao', SYSDATE, 'KH01', 'NV01', 'CN01', 'K01');
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong) VALUES ('DH_VIP03', 'H01', 200);
+
+-- ... (tự thêm đủ 7 lần → tổng 21tr)
+-- Bước 2: Tạo đơn hàng mới → kiểm tra giảm 15%
+-- Đơn hàng mới của KH01 (đã VIP)
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_TEST_VIP', N'Đã giao', SYSDATE, 'KH01', 'NV01', 'CN01', 'K01');
+
+-- Trigger tự động giảm 15%
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_TEST_VIP', 'H01', 10);
+-- Bước 3: So sánh với khách thường
+INSERT INTO DONHANG (MaDH, TrangThai, NgayDat, MaKH, MaNV, MaChiNhanh, MaKho)
+VALUES ('DH_TEST_THUONG', N'Đã giao', SYSDATE, 'KH02', 'NV02', 'CN02', 'K02');
+
+INSERT INTO CHITIETDONHANG (MaDH, MaHoa, SoLuong)
+VALUES ('DH_TEST_THUONG', 'H01', 10);
+-- Bước 4: Xem kết quả
+SELECT 
+    dh.MaDH,
+    kh.TenKH,
+    ctdh.MaHoa,
+    h.TenHoa,
+    ctdh.SoLuong,
+    ctdh.DonGia,
+    ctdh.GiaGiam,
+    ctdh.ThanhTien,
+    v.LoaiKhach
+FROM DONHANG dh
+JOIN KHACHHANG kh ON dh.MaKH = kh.MaKH
+JOIN CHITIETDONHANG ctdh ON dh.MaDH = ctdh.MaDH
+JOIN HOA h ON ctdh.MaHoa = h.MaHoa
+LEFT JOIN V_KHACHHANG_VIP v ON kh.MaKH = v.MaKH
+WHERE dh.MaDH IN ('DH_TEST_VIP', 'DH_TEST_THUONG')
+ORDER BY dh.MaDH;
